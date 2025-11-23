@@ -1,0 +1,15 @@
+{
+  "orderId": "ORD-2025-11-23_20-17-43",
+  "timestamp": "2025-11-23T20:17:43.718775",
+  "customer": {
+    "name": "Parth"
+  },
+  "order": {
+    "drinkType": "Latte",
+    "size": "Medium",
+    "milk": "Almond Milk",
+    "extras": [],
+    "name": "Parth"
+  },
+  "status": "completed"
+}

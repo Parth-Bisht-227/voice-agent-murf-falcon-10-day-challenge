@@ -12,11 +12,12 @@ from livekit.agents import (
     cli,
     metrics,
     tokenize,
-    # function_tool,
-    # RunContext
+    function_tool,
+    RunContext,
 )
 from livekit.plugins import murf, silero, google, deepgram, noise_cancellation
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
+from order_manager import OrderManager
 
 logger = logging.getLogger("agent")
 
@@ -24,30 +25,228 @@ load_dotenv(".env.local")
 
 
 class Assistant(Agent):
-    def __init__(self) -> None:
+    def __init__(self, order_manager: OrderManager) -> None:
+        """
+        Initialize the barista assistant.
+        
+        Args:
+            order_manager: OrderManager instance for handling coffee orders
+        """
+        # Store reference to order manager for all function tools
+        self.order_manager = order_manager
+
         super().__init__(
-            instructions="""You are a helpful voice AI assistant. The user is interacting with you via voice, even if you perceive the conversation as text.
-            You eagerly assist users with their questions by providing information from your extensive knowledge.
-            Your responses are concise, to the point, and without any complex formatting or punctuation including emojis, asterisks, or other symbols.
-            You are curious, friendly, and have a sense of humor.""",
+            instructions="""You are a friendly and efficient barista at a premium coffee shop. Your role is to take voice orders from customers.
+
+Your conversation style:
+- Be warm and welcoming
+- Ask for information ONE AT A TIME, never multiple questions in one response
+- Listen carefully to what the customer says
+- Use the tools provided to capture their order details
+
+Order taking process:
+1. Greet the customer warmly
+2. Ask for their drink choice (if not provided)
+3. Ask for the cup size (if not provided)
+4. Ask for their milk preference (if not provided)
+5. Ask if they want any extras/toppings (if not specified)
+6. Ask for their name (if not provided)
+7. Once you have all details, confirm the order and complete it
+
+Important:
+- Never assume preferences - always ask
+- Use simple, conversational language
+- No complex formatting, emojis, or symbols
+- If they say they're done or that's all, proceed to confirm
+- When all fields are filled, read back the order and use the complete_order tool
+
+Available tools for order management:
+- set_drink_type: Set the drink type
+- set_size: Set cup size (Small, Medium, Large)
+- set_milk_option: Set milk preference
+- add_extra: Add toppings or modifications
+- set_customer_name: Record customer name
+- get_current_order: Check what you've captured so far
+- complete_order: Finish and save the order""",
         )
 
-    # To add tools, use the @function_tool decorator.
-    # Here's an example that adds a simple weather tool.
-    # You also have to add `from livekit.agents import function_tool, RunContext` to the top of this file
-    # @function_tool
-    # async def lookup_weather(self, context: RunContext, location: str):
-    #     """Use this tool to look up current weather information in the given location.
-    #
-    #     If the location is not supported by the weather service, the tool will indicate this. You must tell the user the location's weather is unavailable.
-    #
-    #     Args:
-    #         location: The location to look up weather information for (e.g. city name)
-    #     """
-    #
-    #     logger.info(f"Looking up weather for {location}")
-    #
-    #     return "sunny with a temperature of 70 degrees."
+    @function_tool
+    async def set_drink_type(self, context: RunContext, drink: str) -> str:
+        """
+        Set the drink type for the order.
+        
+        Use this when the customer tells you what drink they want.
+        
+        Args:
+            drink: The type of coffee drink (e.g., "Latte", "Espresso", "Cappuccino")
+            
+        Returns:
+            Confirmation message to relay to the customer
+        """
+        logger.info(f"Setting drink type: {drink}")
+        result = self.order_manager.set_drink_type(drink)
+        return result["message"]
+
+    @function_tool
+    async def set_size(self, context: RunContext, size: str) -> str:
+        """
+        Set the cup size for the order.
+        
+        Use this when the customer specifies their preferred size.
+        
+        Args:
+            size: The cup size (Small, Medium, or Large)
+            
+        Returns:
+            Confirmation message to relay to the customer
+        """
+        logger.info(f"Setting size: {size}")
+        result = self.order_manager.set_size(size)
+        return result["message"]
+
+    @function_tool
+    async def set_milk_option(self, context: RunContext, milk: str) -> str:
+        """
+        Set the milk option for the order.
+        
+        Use this when the customer specifies their milk preference.
+        
+        Args:
+            milk: The milk type (Whole Milk, Oat Milk, Almond Milk, Skim Milk, No Milk, Soy Milk)
+            
+        Returns:
+            Confirmation message to relay to the customer
+        """
+        logger.info(f"Setting milk option: {milk}")
+        result = self.order_manager.set_milk_option(milk)
+        return result["message"]
+
+    @function_tool
+    async def add_extra(self, context: RunContext, extra: str) -> str:
+        """
+        Add an extra or topping to the order.
+        
+        Use this when the customer wants to add extras like whipped cream, caramel drizzle, etc.
+        
+        Args:
+            extra: The extra/topping name (e.g., "Whipped Cream", "Caramel Drizzle", "Extra Shot")
+            
+        Returns:
+            Confirmation message to relay to the customer
+        """
+        logger.info(f"Adding extra: {extra}")
+        result = self.order_manager.add_extra(extra)
+        return result["message"]
+
+    @function_tool
+    async def remove_extra(self, context: RunContext, extra: str) -> str:
+        """
+        Remove an extra or topping from the order.
+        
+        Use this if the customer changes their mind about an extra they mentioned.
+        
+        Args:
+            extra: The extra/topping name to remove
+            
+        Returns:
+            Confirmation message to relay to the customer
+        """
+        logger.info(f"Removing extra: {extra}")
+        result = self.order_manager.remove_extra(extra)
+        return result["message"]
+
+    @function_tool
+    async def set_customer_name(self, context: RunContext, name: str) -> str:
+        """
+        Set the customer's name for the order.
+        
+        Use this to record what name to call out when the order is ready.
+        
+        Args:
+            name: The customer's name
+            
+        Returns:
+            Confirmation message to relay to the customer
+        """
+        logger.info(f"Setting customer name: {name}")
+        result = self.order_manager.set_customer_name(name)
+        return result["message"]
+
+    @function_tool
+    async def get_current_order(self, context: RunContext) -> str:
+        """
+        Get the current order state.
+        
+        Use this to review what information you've collected so far.
+        This helps you know what fields are still missing.
+        
+        Returns:
+            Formatted string of the current order with missing fields highlighted
+        """
+        order = self.order_manager.get_current_order()
+        missing = self.order_manager.get_missing_fields()
+
+        status_str = "Current order:\n"
+        status_str += f"Drink: {order['drinkType'] or 'Not selected'}\n"
+        status_str += f"Size: {order['size'] or 'Not selected'}\n"
+        status_str += f"Milk: {order['milk'] or 'Not selected'}\n"
+        status_str += (
+            f"Extras: {', '.join(order['extras']) if order['extras'] else 'None'}\n"
+        )
+        status_str += f"Name: {order['name'] or 'Not provided'}\n"
+        if missing:
+            status_str += f"\nStill need: {', '.join(missing)}"
+        return status_str
+
+    @function_tool
+    async def complete_order(self, context: RunContext) -> str:
+        """
+        Complete and save the order.
+        
+        Use this ONLY when all fields are filled:
+        - Drink type
+        - Size
+        - Milk option
+        - Customer name
+        
+        This will save the order to a JSON file and notify the customer.
+        
+        Returns:
+            Confirmation message with order details and file location
+        """
+        logger.info("Completing order")
+        
+        # Check if order is complete
+        if not self.order_manager.is_order_complete():
+            missing = self.order_manager.get_missing_fields()
+            return (
+                f"Cannot complete the order yet. Still need: {', '.join(missing)}"
+            )
+
+        try:
+            # Save order to JSON file
+            filename = self.order_manager.save_order_to_json()
+            order = self.order_manager.get_current_order()
+
+            # Create confirmation message
+            confirmation = (
+                f"Perfect! Order confirmed for {order['name']}. "
+                f"One {order['size']} {order['drinkType']} with {order['milk']}. "
+            )
+            if order["extras"]:
+                confirmation += f"With {', '.join(order['extras'])}. "
+            confirmation += f"Your order will be ready in about 5 minutes! Thank you!"
+
+            logger.info(f"Order saved: {filename}")
+
+            # Reset for next customer
+            self.order_manager.reset_order()
+
+            return confirmation
+
+        except ValueError as e:
+            logger.error(f"Error completing order: {e}")
+            return f"Error processing order: {str(e)}"
 
 
 def prewarm(proc: JobProcess):
@@ -55,11 +254,26 @@ def prewarm(proc: JobProcess):
 
 
 async def entrypoint(ctx: JobContext):
+    """
+    Main entry point for the LiveKit agent.
+    
+    This function:
+    1. Sets up logging context
+    2. Creates an OrderManager for handling coffee orders
+    3. Configures the voice pipeline (STT, LLM, TTS, VAD)
+    4. Initializes the Assistant with the order manager
+    5. Starts the session and connects to the user
+    """
     # Logging setup
     # Add any other context you want in all log entries here
     ctx.log_context_fields = {
         "room": ctx.room.name,
     }
+
+    # Create order manager instance for this session
+    # This will be shared across all function tools in the Assistant
+    order_manager = OrderManager()
+    logger.info("OrderManager initialized for new session")
 
     # Set up a voice AI pipeline using OpenAI, Cartesia, AssemblyAI, and the LiveKit turn detector
     session = AgentSession(
@@ -122,8 +336,9 @@ async def entrypoint(ctx: JobContext):
     # await avatar.start(session, room=ctx.room)
 
     # Start the session, which initializes the voice pipeline and warms up the models
+    # Pass the order_manager to the Assistant so it can use the function tools
     await session.start(
-        agent=Assistant(),
+        agent=Assistant(order_manager=order_manager),
         room=ctx.room,
         room_input_options=RoomInputOptions(
             # For telephony applications, use `BVCTelephony` for best results
