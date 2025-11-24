@@ -36,7 +36,7 @@ class Assistant(Agent):
         self.order_manager = order_manager
 
         super().__init__(
-            instructions="""You are a friendly and efficient barista at a premium coffee shop. Your role is to take voice orders from customers.
+            instructions="""You are a friendly and efficient barista at a premium coffee shop CafeCoffeeDay. Your role is to take voice orders from customers.
 
 Your conversation style:
 - Be warm and welcoming
@@ -275,7 +275,7 @@ async def entrypoint(ctx: JobContext):
     order_manager = OrderManager()
     logger.info("OrderManager initialized for new session")
 
-    # Set up a voice AI pipeline using OpenAI, Cartesia, AssemblyAI, and the LiveKit turn detector
+    # Set up a voice AI pipeline using Gemini,DeepGram,Murf Falcon, and the LiveKit turn detector
     session = AgentSession(
         # Speech-to-text (STT) is your agent's ears, turning the user's speech into text that the LLM can understand
         # See all available models at https://docs.livekit.io/agents/models/stt/
