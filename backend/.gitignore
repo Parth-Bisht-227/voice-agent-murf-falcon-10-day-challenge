@@ -10,3 +10,5 @@ KMS
 *.egg-info
 .pytest_cache
 .ruff_cache
+backend/wellness_log.json
+backend/orders/

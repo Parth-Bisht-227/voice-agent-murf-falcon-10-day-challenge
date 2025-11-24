@@ -33,11 +33,7 @@ const BOTTOM_VIEW_MOTION_PROPS = {
   initial: 'hidden',
   animate: 'visible',
   exit: 'hidden',
-  transition: {
-    duration: 0.3,
-    delay: 0.5,
-    ease: 'easeOut',
-  },
+  transition: ({ duration: 0.3, delay: 0.5, ease: [0.22, 1, 0.36, 1] } as any),
 };
 
 interface FadeProps {
@@ -81,14 +77,36 @@ export const SessionView = ({
     screenShare: appConfig.supportsVideoInput,
   };
 
-  useEffect(() => {
-    const lastMessage = messages.at(-1);
-    const lastMessageIsLocal = lastMessage?.from?.isLocal === true;
+  // useEffect(() => {
+  //   const lastMessage = messages.at(-1);
+  //   const lastMessageIsLocal = lastMessage?.from?.isLocal === true;
 
-    if (scrollAreaRef.current && lastMessageIsLocal) {
-      scrollAreaRef.current.scrollTop = scrollAreaRef.current.scrollHeight;
+  //   if (scrollAreaRef.current && lastMessageIsLocal) {
+  //     scrollAreaRef.current.scrollTop = scrollAreaRef.current.scrollHeight;
+  //   }
+  // }, [messages]);
+  
+  useEffect(() => {
+  // Only attempt to scroll when the chat panel is open
+  if (!chatOpen) return;
+
+  // If there's no scroll area element, nothing to do
+  const el = scrollAreaRef.current;
+  if (!el) return;
+
+  // Wait a tick so the DOM updates (ensures new messages are rendered)
+  // requestAnimationFrame is ideal for this
+  const raf = requestAnimationFrame(() => {
+    try {
+      el.scrollTop = el.scrollHeight;
+    } catch (err) {
+      // defensive: ignore if something goes wrong
+      console.warn("auto-scroll failed", err);
     }
-  }, [messages]);
+  });
+
+  return () => cancelAnimationFrame(raf);
+}, [messages, chatOpen]);
 
   return (
     <section className="bg-background relative z-10 h-full w-full overflow-hidden" {...props}>
@@ -102,9 +120,11 @@ export const SessionView = ({
         <Fade top className="absolute inset-x-4 top-0 h-40" />
         <ScrollArea ref={scrollAreaRef} className="px-4 pt-40 pb-[150px] md:px-6 md:pb-[180px]">
           <ChatTranscript
-            hidden={!chatOpen}
             messages={messages}
-            className="mx-auto max-w-2xl space-y-3 transition-opacity duration-300 ease-out"
+            className={cn(
+              'mx-auto max-w-2xl space-y-3 transition-opacity duration-300 ease-out',
+              chatOpen ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
+            )}
           />
         </ScrollArea>
       </div>

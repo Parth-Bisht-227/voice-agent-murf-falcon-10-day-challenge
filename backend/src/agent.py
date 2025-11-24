@@ -1,5 +1,4 @@
 import logging
-
 from dotenv import load_dotenv
 from livekit.agents import (
     Agent,
@@ -17,13 +16,16 @@ from livekit.agents import (
 )
 from livekit.plugins import murf, silero, google, deepgram, noise_cancellation
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
-from order_manager import OrderManager
+
+from wellness_manager import WellnessManager, CheckInEntry
+from datetime import datetime
+from typing import Optional
 
 logger = logging.getLogger("agent")
 
 load_dotenv(".env.local")
 
-
+'''  
 class Assistant(Agent):
     def __init__(self, order_manager: OrderManager) -> None:
         """
@@ -248,6 +250,132 @@ Available tools for order management:
             logger.error(f"Error completing order: {e}")
             return f"Error processing order: {str(e)}"
 
+'''
+
+class WellnessAssistant(Agent):
+    def __init__(self, wellness_manager: WellnessManager) -> None:
+        """
+        A grounded, non-diagnostic daily wellness companion.
+
+        The assistant uses function tools to:
+        - start a brief check-in
+        - record mood/energy/objectives across turns (stored in session memory)
+        - summarize and save the check-in to wellness_log.json
+        - reference prior check-ins for context
+        """
+        # Store reference to wellness manager for all function tools
+        self.wellness_mgr = wellness_manager
+
+        # in-memory dict for current session check-in
+        self._session_checkin = {}
+
+        super().__init__(
+            instructions="""You are a supportive, grounded daily wellness companion.
+- Speak warmly and plainly. Ask one question at a time.
+- Ask about mood and energy. Ask for 1 to 3 practical objectives for the day.
+- Offer short, practical suggestions (break tasks into small steps, short breaks, 5-minute walks).
+- Do NOT provide medical diagnoses or medical advice.
+- When the user confirms, save the check-in and provide a brief recap.
+Use the available tools to record answers and to persist the check-in."""
+        )
+
+    # Tool: start the check-in & reference the last entry
+    @function_tool
+    async def start_checkin(self, context: RunContext) -> str:
+        last = self.wellness_mgr.last_entry()
+        if last:
+            last_mood = last.get("mood_text", "")
+            last_ts = last.get("timestamp", "")[:10]
+            return (
+                f"Welcome back. Last time ({last_ts}) you said: '{last_mood}'. "
+                "Let's do a quick check-in. How are you feeling today in a few words?"
+            )
+        else:
+            return "Hi — let's do a short daily check-in. How are you feeling today in a few words?"
+
+    # Tool to record mood text and optional scale
+    @function_tool
+    async def record_mood(self, context: RunContext, mood_text: str, mood_scale: Optional[int] = None) -> str:
+        s = getattr(self, "_session_checkin", {})
+        s["mood_text"] = mood_text.strip()
+        if mood_scale is not None:
+            # clamp/validate 1-10
+            try:
+                m = int(mood_scale)
+                if m < 1:
+                    m = 1
+                if m > 10:
+                    m = 10
+                s["mood_scale"] = m
+            except Exception:
+                pass
+        self._session_checkin = s
+        return "Thanks — I noted how you're feeling."
+
+    # Record energy comment
+    @function_tool
+    async def record_energy(self, context: RunContext, energy: str) -> str:
+        s = getattr(self, "_session_checkin", {})
+        s["energy"] = energy.strip()
+        self._session_checkin = s
+        return "Got it — I've recorded your energy level."
+
+    # Record objectives (list of 1-3 strings)
+    @function_tool
+    async def record_objectives(self, context: RunContext, objectives: list[str]) -> str:
+        s = getattr(self, "_session_checkin", {})
+        cleaned = [o.strip() for o in objectives if o.strip()]
+        s["objectives"] = cleaned[:3]  # max 3
+        self._session_checkin = s
+        return f"Great — I've noted your {len(s['objectives'])} objectives for today."
+
+    # Return current session check-in state (so LLM can read what is captured)
+    @function_tool
+    async def get_session_checkin(self, context: RunContext) -> str:
+        import json
+        s = getattr(self, "_session_checkin", {})
+        return json.dumps(s, ensure_ascii=False)
+
+    # Create summary, save to JSON via WellnessManager, and clear session
+    @function_tool
+    async def summarize_and_save(self, context: RunContext) -> str:
+        s = getattr(self, "_session_checkin", {})
+        mood = s.get("mood_text", "")
+        energy = s.get("energy", "")
+        objectives = s.get("objectives", [])
+        mood_scale = s.get("mood_scale")
+        # build a small agent summary
+        summary_parts = []
+        if mood:
+            summary_parts.append(f"Mood: {mood}")
+        if energy:
+            summary_parts.append(f"Energy: {energy}")
+        if objectives:
+            summary_parts.append(f"Goals: {', '.join(objectives)}")
+
+        summary = " | ".join(summary_parts) if summary_parts else "Short check-in."
+
+        entry = CheckInEntry(
+            timestamp=datetime.utcnow().isoformat(),
+            mood_text=mood,
+            mood_scale=mood_scale,
+            energy=energy,
+            objectives=objectives,
+            agent_summary=summary,
+        )
+
+        # persist
+        self.wellness_mgr.append_checkin(entry)
+
+        # clear session state
+        self._session_checkin = {}
+        return f"Thanks for checking in! Here's a quick summary: {summary}"
+
+    # Return a short summary of recent check-ins for LLM context
+    @function_tool
+    async def get_recent_summary(self, context: RunContext, n: int = 3) -> str:
+        return self.wellness_mgr.summary_of_recent(n=n)
+                
 
 def prewarm(proc: JobProcess):
     proc.userdata["vad"] = silero.VAD.load()
@@ -272,8 +400,11 @@ async def entrypoint(ctx: JobContext):
 
     # Create order manager instance for this session
     # This will be shared across all function tools in the Assistant
-    order_manager = OrderManager()
-    logger.info("OrderManager initialized for new session")
+    # order_manager = OrderManager()
+    # logger.info("OrderManager initialized for new session")
+
+    wellness_mgr = WellnessManager()
+    logger.info("WellnessManager initialized for the session")
 
     # Set up a voice AI pipeline using Gemini,DeepGram,Murf Falcon, and the LiveKit turn detector
     session = AgentSession(
@@ -338,7 +469,8 @@ async def entrypoint(ctx: JobContext):
     # Start the session, which initializes the voice pipeline and warms up the models
     # Pass the order_manager to the Assistant so it can use the function tools
     await session.start(
-        agent=Assistant(order_manager=order_manager),
+        # agent=Assistant(order_manager=order_manager),
+        agent = WellnessAssistant(wellness_manager=wellness_mgr),
         room=ctx.room,
         room_input_options=RoomInputOptions(
             # For telephony applications, use `BVCTelephony` for best results
