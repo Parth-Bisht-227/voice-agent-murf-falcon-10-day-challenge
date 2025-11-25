@@ -1,354 +1,297 @@
 import logging
+import json
+import asyncio
+from pathlib import Path
+from dataclasses import dataclass, field
+from typing import Optional
 
 from dotenv import load_dotenv
 from livekit.agents import (
-    Agent,
-    AgentSession,
-    JobContext,
-    JobProcess,
-    MetricsCollectedEvent,
+    JobContext, 
+    WorkerOptions, 
+    cli, 
     RoomInputOptions,
-    WorkerOptions,
-    cli,
-    metrics,
-    tokenize,
-    function_tool,
-    RunContext,
+    JobProcess,
 )
+from livekit.agents.llm import function_tool
+from livekit.agents.voice import Agent, AgentSession, RunContext
 from livekit.plugins import murf, silero, google, deepgram, noise_cancellation
-from livekit.plugins.turn_detector.multilingual import MultilingualModel
-from order_manager import OrderManager
 
-logger = logging.getLogger("agent")
+logger = logging.getLogger("tutor-agent")
+logger.setLevel(logging.INFO)
 
 load_dotenv(".env.local")
 
+# --- 1. GLOBAL CONTENT LOADER ---
 
-class Assistant(Agent):
-    def __init__(self, order_manager: OrderManager) -> None:
-        """
-        Initialize the barista assistant.
+def load_tutor_content():
+    """Load tutor content from JSON file."""
+    content_path = Path(__file__).parent.parent / "shared-data" / "day4_tutor_content.json"
+    try:
+        with open(content_path, "r") as f:
+            content = json.load(f)
+            return content
+    except FileNotFoundError:
+        logger.error(f"Content file not found: {content_path}.")
+        return [{"id": "variables", "title": "Variables", "summary": "Variables store values.", "sample_question": "What is a variable?"}]
+    
+TUTOR_CONTENT = load_tutor_content()
+
+def get_concepts_list() -> str:
+    return ", ".join(concept["title"] for concept in TUTOR_CONTENT)
+
+def get_concept_by_keyword(keyword: str) -> Optional[dict]:
+    keyword_lower = keyword.lower()
+    for concept in TUTOR_CONTENT:
+        if (keyword_lower in concept["title"].lower() or 
+            keyword_lower in concept["id"].lower() or 
+            concept["id"] == keyword_lower):
+            return concept
+    return None
+
+# --- 2. MULTI-AGENT ARCHITECTURE SETUP ---
+
+@dataclass
+class UserData:
+    """Stores data and agents to be shared across the session"""
+    personas: dict[str, Agent] = field(default_factory=dict)
+    prev_agent: Optional[Agent] = None
+    ctx: Optional[JobContext] = None
+
+    def summarize(self) -> str:
+        return f"Current concepts available: {get_concepts_list()}"
+
+RunContext_T = RunContext[UserData]
+
+class BaseAgent(Agent):
+    """
+    Base class that handles the complex logic of switching between agents
+    and preserving the chat history context.
+    """
+    async def on_enter(self) -> None:
+        agent_name = self.__class__.__name__
+        logger.info(f"Entering {agent_name}")
+
+        userdata: UserData = self.session.userdata
         
-        Args:
-            order_manager: OrderManager instance for handling coffee orders
-        """
-        # Store reference to order manager for all function tools
-        self.order_manager = order_manager
+        # FIX: Check if connected before accessing local_participant
+        if userdata.ctx and userdata.ctx.room and userdata.ctx.room.connection_state == "connected":
+            try:
+                # Tag the participant in the room so we know who is active
+                await userdata.ctx.room.local_participant.set_attributes({"agent": agent_name})
+            except Exception as e:
+                logger.warning(f"Could not set agent attribute: {e}")
 
+        # --- Context Preservation Logic ---
+        chat_ctx = self.chat_ctx.copy()
+
+        if userdata.prev_agent:
+            items_copy = self._truncate_chat_ctx(
+                userdata.prev_agent.chat_ctx.items, keep_function_call=True
+            )
+            existing_ids = {item.id for item in chat_ctx.items}
+            items_copy = [item for item in items_copy if item.id not in existing_ids]
+            chat_ctx.items.extend(items_copy)
+
+        # Inject the system prompt for this specific agent
+        chat_ctx.add_message(
+            role="system",
+            content=f"{self.instructions}" 
+        )
+        await self.update_chat_ctx(chat_ctx)
+        
+        # Say hello immediately upon entering
+        await self.session.generate_reply()
+
+    def _truncate_chat_ctx(
+        self,
+        items: list,
+        keep_last_n_messages: int = 6,
+        keep_system_message: bool = False,
+        keep_function_call: bool = False,
+    ) -> list:
+        """Truncate the chat context to keep only recent relevant messages."""
+        def _valid_item(item) -> bool:
+            if not keep_system_message and item.type == "message" and item.role == "system":
+                return False
+            if not keep_function_call and item.type in ["function_call", "function_call_output"]:
+                return False
+            return True
+
+        new_items = []
+        for item in reversed(items):
+            if _valid_item(item):
+                new_items.append(item)
+            if len(new_items) >= keep_last_n_messages:
+                break
+        new_items = new_items[::-1]
+
+        while new_items and new_items[0].type in ["function_call", "function_call_output"]:
+            new_items.pop(0)
+
+        return new_items
+
+    async def _transfer_to_agent(self, name: str, context: RunContext_T) -> Agent:
+        """The magic function that performs the handoff"""
+        userdata = context.userdata
+        current_agent = context.session.current_agent
+        next_agent = userdata.personas[name]
+        userdata.prev_agent = current_agent
+        
+        logger.info(f"Transferring from {current_agent.__class__.__name__} to {name}")
+        return next_agent
+
+# --- 3. DEFINING THE SPECIFIC AGENTS ---
+
+class CoordinatorAgent(BaseAgent):
+    def __init__(self) -> None:
         super().__init__(
-            instructions="""You are a friendly and efficient barista at a premium coffee shop CafeCoffeeDay. Your role is to take voice orders from customers.
-
-Your conversation style:
-- Be warm and welcoming
-- Ask for information ONE AT A TIME, never multiple questions in one response
-- Listen carefully to what the customer says
-- Use the tools provided to capture their order details
-
-Order taking process:
-1. Greet the customer warmly
-2. Ask for their drink choice (if not provided)
-3. Ask for the cup size (if not provided)
-4. Ask for their milk preference (if not provided)
-5. Ask if they want any extras/toppings (if not specified)
-6. Ask for their name (if not provided)
-7. Once you have all details, confirm the order and complete it
-
-Important:
-- Never assume preferences - always ask
-- Use simple, conversational language
-- No complex formatting, emojis, or symbols
-- If they say they're done or that's all, proceed to confirm
-- When all fields are filled, read back the order and use the complete_order tool
-
-Available tools for order management:
-- set_drink_type: Set the drink type
-- set_size: Set cup size (Small, Medium, Large)
-- set_milk_option: Set milk preference
-- add_extra: Add toppings or modifications
-- set_customer_name: Record customer name
-- get_current_order: Check what you've captured so far
-- complete_order: Finish and save the order""",
+            instructions=f"""You are the Coordinator.
+            Welcome users to the coding tutor!
+            Available Modes:
+            1. Learn (Teacher Matthew will explain concepts)
+            2. Quiz (Alicia will test you)
+            3. Teach-Back (Ken will listen to your explanation)
+            
+            Ask the user what they want to do. If they choose a mode, use the transfer tools.
+            """,
+            stt=deepgram.STT(model="nova-3"),
+            llm=google.LLM(model="gemini-2.5-flash"),
+            tts=murf.TTS(voice="en-US-matthew", style="Conversation"),
+            vad=silero.VAD.load()
         )
 
     @function_tool
-    async def set_drink_type(self, context: RunContext, drink: str) -> str:
-        """
-        Set the drink type for the order.
-        
-        Use this when the customer tells you what drink they want.
-        
-        Args:
-            drink: The type of coffee drink (e.g., "Latte", "Espresso", "Cappuccino")
-            
-        Returns:
-            Confirmation message to relay to the customer
-        """
-        logger.info(f"Setting drink type: {drink}")
-        result = self.order_manager.set_drink_type(drink)
-        return result["message"]
+    async def start_learn_mode(self, context: RunContext_T) -> Agent:
+        """Switch to Learn Mode (Matthew)."""
+        await self.session.say("Great choice! I'll hand you over to Matthew for the lesson.")
+        return await self._transfer_to_agent("learn", context)
 
     @function_tool
-    async def set_size(self, context: RunContext, size: str) -> str:
-        """
-        Set the cup size for the order.
-        
-        Use this when the customer specifies their preferred size.
-        
-        Args:
-            size: The cup size (Small, Medium, or Large)
-            
-        Returns:
-            Confirmation message to relay to the customer
-        """
-        logger.info(f"Setting size: {size}")
-        result = self.order_manager.set_size(size)
-        return result["message"]
-
+    async def start_quiz_mode(self, context: RunContext_T) -> Agent:
+        """Switch to Quiz Mode (Alicia)."""
+        await self.session.say("Time to test your knowledge! Here is Alicia.")
+        return await self._transfer_to_agent("quiz", context)
+    
     @function_tool
-    async def set_milk_option(self, context: RunContext, milk: str) -> str:
-        """
-        Set the milk option for the order.
-        
-        Use this when the customer specifies their milk preference.
-        
-        Args:
-            milk: The milk type (Whole Milk, Oat Milk, Almond Milk, Skim Milk, No Milk, Soy Milk)
-            
-        Returns:
-            Confirmation message to relay to the customer
-        """
-        logger.info(f"Setting milk option: {milk}")
-        result = self.order_manager.set_milk_option(milk)
-        return result["message"]
+    async def start_teach_back_mode(self, context: RunContext_T) -> Agent:
+        """Switch to Teach-Back Mode (Ken)."""
+        await self.session.say("Teaching is the best way to learn. Ken is ready to listen.")
+        return await self._transfer_to_agent("teach_back", context)
 
-    @function_tool
-    async def add_extra(self, context: RunContext, extra: str) -> str:
-        """
-        Add an extra or topping to the order.
-        
-        Use this when the customer wants to add extras like whipped cream, caramel drizzle, etc.
-        
-        Args:
-            extra: The extra/topping name (e.g., "Whipped Cream", "Caramel Drizzle", "Extra Shot")
-            
-        Returns:
-            Confirmation message to relay to the customer
-        """
-        logger.info(f"Adding extra: {extra}")
-        result = self.order_manager.add_extra(extra)
-        return result["message"]
 
-    @function_tool
-    async def remove_extra(self, context: RunContext, extra: str) -> str:
-        """
-        Remove an extra or topping from the order.
-        
-        Use this if the customer changes their mind about an extra they mentioned.
-        
-        Args:
-            extra: The extra/topping name to remove
-            
-        Returns:
-            Confirmation message to relay to the customer
-        """
-        logger.info(f"Removing extra: {extra}")
-        result = self.order_manager.remove_extra(extra)
-        return result["message"]
-
-    @function_tool
-    async def set_customer_name(self, context: RunContext, name: str) -> str:
-        """
-        Set the customer's name for the order.
-        
-        Use this to record what name to call out when the order is ready.
-        
-        Args:
-            name: The customer's name
-            
-        Returns:
-            Confirmation message to relay to the customer
-        """
-        logger.info(f"Setting customer name: {name}")
-        result = self.order_manager.set_customer_name(name)
-        return result["message"]
-
-    @function_tool
-    async def get_current_order(self, context: RunContext) -> str:
-        """
-        Get the current order state.
-        
-        Use this to review what information you've collected so far.
-        This helps you know what fields are still missing.
-        
-        Returns:
-            Formatted string of the current order with missing fields highlighted
-        """
-        order = self.order_manager.get_current_order()
-        missing = self.order_manager.get_missing_fields()
-
-        status_str = "Current order:\n"
-        status_str += f"Drink: {order['drinkType'] or 'Not selected'}\n"
-        status_str += f"Size: {order['size'] or 'Not selected'}\n"
-        status_str += f"Milk: {order['milk'] or 'Not selected'}\n"
-        status_str += (
-            f"Extras: {', '.join(order['extras']) if order['extras'] else 'None'}\n"
+class LearnAgent(BaseAgent):
+    def __init__(self) -> None:
+        super().__init__(
+            instructions=f"""You are Matthew (Learn Mode). 
+            Explain these concepts: {get_concepts_list()}.
+            Use analogies. Keep it brief. 
+            If the user wants to quiz or stop, ask the coordinator.""",
+            stt=deepgram.STT(model="nova-3"),
+            llm=google.LLM(model="gemini-2.5-flash"),
+            tts=murf.TTS(voice="en-US-matthew", style="Conversation"),
+            vad=silero.VAD.load()
         )
-        status_str += f"Name: {order['name'] or 'Not provided'}\n"
-        if missing:
-            status_str += f"\nStill need: {', '.join(missing)}"
-        return status_str
 
     @function_tool
-    async def complete_order(self, context: RunContext) -> str:
-        """
-        Complete and save the order.
-        
-        Use this ONLY when all fields are filled:
-        - Drink type
-        - Size
-        - Milk option
-        - Customer name
-        
-        This will save the order to a JSON file and notify the customer.
-        
-        Returns:
-            Confirmation message with order details and file location
-        """
-        logger.info("Completing order")
-        
-        # Check if order is complete
-        if not self.order_manager.is_order_complete():
-            missing = self.order_manager.get_missing_fields()
-            return (
-                f"Cannot complete the order yet. Still need: {', '.join(missing)}"
-            )
+    async def get_concept_details(self, context: RunContext_T, keyword: str) -> str:
+        """Get details to explain a concept."""
+        concept = get_concept_by_keyword(keyword)
+        if concept: return f"Summary: {concept['summary']}"
+        return "Concept not found."
 
-        try:
-            # Save order to JSON file
-            filename = self.order_manager.save_order_to_json()
-            order = self.order_manager.get_current_order()
+    @function_tool
+    async def return_to_coordinator(self, context: RunContext_T) -> Agent:
+        """Go back to the main menu/coordinator."""
+        return await self._transfer_to_agent("coordinator", context)
 
-            # Create confirmation message
-            confirmation = (
-                f"Perfect! Order confirmed for {order['name']}. "
-                f"One {order['size']} {order['drinkType']} with {order['milk']}. "
-            )
-            if order["extras"]:
-                confirmation += f"With {', '.join(order['extras'])}. "
-            confirmation += f"Your order will be ready in about 5 minutes! Thank you!"
 
-            logger.info(f"Order saved: {filename}")
+class QuizAgent(BaseAgent):
+    def __init__(self) -> None:
+        super().__init__(
+            instructions=f"""You are Alicia (Quiz Mode). 
+            Ask questions about: {get_concepts_list()}.
+            Verify their answer. be energetic!""",
+            stt=deepgram.STT(model="nova-3"),
+            llm=google.LLM(model="gemini-2.5-flash"),
+            tts=murf.TTS(voice="en-US-alicia", style="Conversation"),
+            vad=silero.VAD.load()
+        )
 
-            # Reset for next customer
-            self.order_manager.reset_order()
+    @function_tool
+    async def get_quiz_question(self, context: RunContext_T, keyword: str) -> str:
+        """Get a specific question for a concept."""
+        concept = get_concept_by_keyword(keyword)
+        if concept: return f"Question: {concept['sample_question']}"
+        return "Concept not found."
 
-            return confirmation
+    @function_tool
+    async def return_to_coordinator(self, context: RunContext_T) -> Agent:
+        """Go back to the main menu."""
+        return await self._transfer_to_agent("coordinator", context)
 
-        except ValueError as e:
-            logger.error(f"Error completing order: {e}")
-            return f"Error processing order: {str(e)}"
 
+class TeachBackAgent(BaseAgent):
+    def __init__(self) -> None:
+        super().__init__(
+            instructions=f"""You are Ken (Teach-Back Mode). 
+            Ask the user to explain a concept from: {get_concepts_list()}.
+            Listen to them, then grade their explanation.""",
+            stt=deepgram.STT(model="nova-3"),
+            llm=google.LLM(model="gemini-2.5-flash"),
+            tts=murf.TTS(voice="en-US-ken", style="Conversation"),
+            vad=silero.VAD.load()
+        )
+
+    @function_tool
+    async def get_target_concept(self, context: RunContext_T, keyword: str) -> str:
+        """Check what the user should be explaining."""
+        concept = get_concept_by_keyword(keyword)
+        if concept: return f"They should explain: {concept['summary']}"
+        return "Concept not found."
+
+    @function_tool
+    async def return_to_coordinator(self, context: RunContext_T) -> Agent:
+        """Go back to the main menu."""
+        return await self._transfer_to_agent("coordinator", context)
+
+
+# --- 4. PREWARM & ENTRYPOINT ---
 
 def prewarm(proc: JobProcess):
+    """Preload VAD model."""
     proc.userdata["vad"] = silero.VAD.load()
 
-
 async def entrypoint(ctx: JobContext):
-    """
-    Main entry point for the LiveKit agent.
+    # 1. Initialize the shared data structure
+    userdata = UserData(ctx=ctx)
+
+    # 2. Create instances of all agents
+    coordinator = CoordinatorAgent()
+    learn_agent = LearnAgent()
+    quiz_agent = QuizAgent()
+    teach_back_agent = TeachBackAgent()
+
+    # 3. Register them in the dictionary
+    userdata.personas.update({
+        "coordinator": coordinator,
+        "learn": learn_agent,
+        "quiz": quiz_agent,
+        "teach_back": teach_back_agent
+    })
+
+    # 4. Create the session with UserData
+    session = AgentSession[UserData](userdata=userdata)
     
-    This function:
-    1. Sets up logging context
-    2. Creates an OrderManager for handling coffee orders
-    3. Configures the voice pipeline (STT, LLM, TTS, VAD)
-    4. Initializes the Assistant with the order manager
-    5. Starts the session and connects to the user
-    """
-    # Logging setup
-    # Add any other context you want in all log entries here
-    ctx.log_context_fields = {
-        "room": ctx.room.name,
-    }
-
-    # Create order manager instance for this session
-    # This will be shared across all function tools in the Assistant
-    order_manager = OrderManager()
-    logger.info("OrderManager initialized for new session")
-
-    # Set up a voice AI pipeline using Gemini,DeepGram,Murf Falcon, and the LiveKit turn detector
-    session = AgentSession(
-        # Speech-to-text (STT) is your agent's ears, turning the user's speech into text that the LLM can understand
-        # See all available models at https://docs.livekit.io/agents/models/stt/
-        stt=deepgram.STT(model="nova-3"),
-        # A Large Language Model (LLM) is your agent's brain, processing user input and generating a response
-        # See all available models at https://docs.livekit.io/agents/models/llm/
-        llm=google.LLM(
-                model="gemini-2.5-flash",
-            ),
-        # Text-to-speech (TTS) is your agent's voice, turning the LLM's text into speech that the user can hear
-        # See all available models as well as voice selections at https://docs.livekit.io/agents/models/tts/
-        tts=murf.TTS(
-                voice="en-US-matthew", 
-                style="Conversation",
-                tokenizer=tokenize.basic.SentenceTokenizer(min_sentence_len=2),
-                text_pacing=True
-            ),
-        # VAD and turn detection are used to determine when the user is speaking and when the agent should respond
-        # See more at https://docs.livekit.io/agents/build/turns
-        turn_detection=MultilingualModel(),
-        vad=ctx.proc.userdata["vad"],
-        # allow the LLM to generate a response while waiting for the end of turn
-        # See more at https://docs.livekit.io/agents/build/audio/#preemptive-generation
-        preemptive_generation=True,
-    )
-
-    # To use a realtime model instead of a voice pipeline, use the following session setup instead.
-    # (Note: This is for the OpenAI Realtime API. For other providers, see https://docs.livekit.io/agents/models/realtime/))
-    # 1. Install livekit-agents[openai]
-    # 2. Set OPENAI_API_KEY in .env.local
-    # 3. Add `from livekit.plugins import openai` to the top of this file
-    # 4. Use the following session setup instead of the version above
-    # session = AgentSession(
-    #     llm=openai.realtime.RealtimeModel(voice="marin")
-    # )
-
-    # Metrics collection, to measure pipeline performance
-    # For more information, see https://docs.livekit.io/agents/build/metrics/
-    usage_collector = metrics.UsageCollector()
-
-    @session.on("metrics_collected")
-    def _on_metrics_collected(ev: MetricsCollectedEvent):
-        metrics.log_metrics(ev.metrics)
-        usage_collector.collect(ev.metrics)
-
-    async def log_usage():
-        summary = usage_collector.get_summary()
-        logger.info(f"Usage: {summary}")
-
-    ctx.add_shutdown_callback(log_usage)
-
-    # # Add a virtual avatar to the session, if desired
-    # # For other providers, see https://docs.livekit.io/agents/models/avatar/
-    # avatar = hedra.AvatarSession(
-    #   avatar_id="...",  # See https://docs.livekit.io/agents/models/avatar/plugins/hedra
-    # )
-    # # Start the avatar and wait for it to join
-    # await avatar.start(session, room=ctx.room)
-
-    # Start the session, which initializes the voice pipeline and warms up the models
-    # Pass the order_manager to the Assistant so it can use the function tools
-    await session.start(
-        agent=Assistant(order_manager=order_manager),
-        room=ctx.room,
-        room_input_options=RoomInputOptions(
-            # For telephony applications, use `BVCTelephony` for best results
-            noise_cancellation=noise_cancellation.BVC(),
-        ),
-    )
-
-    # Join the room and connect to the user
+    # --- CRITICAL FIX: Connect FIRST, then Start ---
+    # We must connect first so on_enter can access the participant attributes
     await ctx.connect()
 
+    # 5. Start with the Coordinator
+    await session.start(
+        agent=coordinator,
+        room=ctx.room,
+    )
 
 if __name__ == "__main__":
     cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, prewarm_fnc=prewarm))
