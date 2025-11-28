@@ -1,0 +1,29 @@
+{
+  "staples": [
+    { "name": "India Gate Basmati Rice (1kg)", "price": 140.00, "tags": ["rice", "biryani", "lunch", "dal chawal"] },
+    { "name": "Aashirvaad Atta (5kg)", "price": 245.00, "tags": ["flour", "roti", "chapati", "dinner"] },
+    { "name": "Tata Toor Dal (1kg)", "price": 165.00, "tags": ["lentils", "protein", "dal chawal"] },
+    { "name": "Tata Salt (1kg)", "price": 28.00, "tags": ["spice", "essential", "cooking"] },
+    { "name": "Fortune Mustard Oil (1L)", "price": 155.00, "tags": ["oil", "cooking", "essential"] }
+  ],
+  "vegetables": [
+    { "name": "Potatoes (1kg)", "price": 40.00, "tags": ["aloo", "vegetable", "sabzi"] },
+    { "name": "Onions (1kg)", "price": 60.00, "tags": ["pyaaz", "vegetable", "gravy", "salad"] },
+    { "name": "Tomatoes (1kg)", "price": 50.00, "tags": ["tamatar", "vegetable", "gravy"] },
+    { "name": "Green Chillies (100g)", "price": 15.00, "tags": ["spice", "mirchi", "essential"] },
+    { "name": "Ginger-Garlic Paste", "price": 30.00, "tags": ["spice", "gravy", "essential"] }
+  ],
+  "dairy_and_breakfast": [
+    { "name": "Amul Taaza Milk (500ml)", "price": 27.00, "tags": ["dairy", "chai", "coffee", "breakfast"] },
+    { "name": "Amul Butter (100g)", "price": 58.00, "tags": ["dairy", "toast", "paratha", "breakfast"] },
+    { "name": "Paneer (200g)", "price": 95.00, "tags": ["dairy", "vegetarian", "curry", "dinner"] },
+    { "name": "Maggi Noodles (Single)", "price": 14.00, "tags": ["snack", "instant", "hostel food"] },
+    { "name": "Brown Bread", "price": 45.00, "tags": ["bakery", "toast", "breakfast"] }
+  ],
+  "beverages_and_snacks": [
+    { "name": "Red Label Tea (250g)", "price": 130.00, "tags": ["chai", "tea", "morning"] },
+    { "name": "Sugar (1kg)", "price": 45.00, "tags": ["sweetener", "chai", "coffee"] },
+    { "name": "Parle-G Biscuits", "price": 10.00, "tags": ["snack", "chai time", "biscuits"] },
+    { "name": "Haldiram Bhujia", "price": 55.00, "tags": ["namkeen", "snack"] }
+  ]
+}

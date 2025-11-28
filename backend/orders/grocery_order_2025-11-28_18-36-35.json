@@ -1,0 +1,33 @@
+{
+  "order_id": "ORD-2025-11-28_18-36-35",
+  "timestamp": "2025-11-28T18:36:36.000801",
+  "items": [
+    {
+      "name": "Maggi Noodles (Single)",
+      "quantity": 2,
+      "price_per_unit": 14.0,
+      "total": 28.0
+    },
+    {
+      "name": "Paneer (200g)",
+      "quantity": 1,
+      "price_per_unit": 95.0,
+      "total": 95.0
+    },
+    {
+      "name": "India Gate Basmati Rice (1kg)",
+      "quantity": 1,
+      "price_per_unit": 140.0,
+      "total": 140.0
+    },
+    {
+      "name": "Tata Toor Dal (1kg)",
+      "quantity": 1,
+      "price_per_unit": 165.0,
+      "total": 165.0
+    }
+  ],
+  "total_price": 428.0,
+  "currency": "INR",
+  "status": "placed"
+}

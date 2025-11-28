@@ -1,0 +1,15 @@
+{
+  "order_id": "ORD-2025-11-28_18-22-27",
+  "timestamp": "2025-11-28T18:22:27.124812",
+  "items": [
+    {
+      "name": "Maggi Noodles (Single)",
+      "quantity": 4,
+      "price_per_unit": 14.0,
+      "total": 56.0
+    }
+  ],
+  "total_price": 56.0,
+  "currency": "INR",
+  "status": "placed"
+}
